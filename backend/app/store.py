@@ -16,7 +16,7 @@ class Store:
         }
 
     def module_names(self) -> list[str]:
-        return sorted(self._tables)
+        return sorted(name for name in self._tables if name not in INTERNAL_TABLES)
 
     def rows(self, module: str) -> list[dict[str, Any]]:
         return self._tables.setdefault(module, [])
@@ -47,3 +47,6 @@ class Store:
 
 
 store = Store()
+
+# 仅用于主档归并的内部明细表，不单独算作一个业务模块，也不计入概览汇总。
+INTERNAL_TABLES = {"atp_supplement"}
