@@ -18,7 +18,14 @@
       </article>
     </div>
 
-    <form class="filter-bar" @submit.prevent="reload">
+    <p v-if="noBaliseDevices.length" class="warn-bar">
+      无应答器设备：
+      <span v-for="item in noBaliseDevices" :key="item.设备编号" class="warn-item">
+        {{ item.设备编号 }}（{{ item.原因 }}）
+      </span>
+    </p>
+
+    <form class="filter-bar" @submit.prevent="onSearch">
       <label v-for="field in filterFields" :key="field" class="filter-item">
         <span>{{ field }}</span>
         <input v-model="filters[field]" :placeholder="`按${field}检索`" />
@@ -26,6 +33,7 @@
       <button class="btn" type="submit">查询</button>
       <button class="btn ghost" type="button" @click="resetFilters">重置条件</button>
     </form>
+    <p v-if="noticeMessage" class="notice-text">{{ noticeMessage }}</p>
 
     <table class="data-table">
       <thead>
@@ -36,7 +44,18 @@
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="String(row.id)">
-          <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
+          <td v-for="column in columns" :key="column">
+            <span
+              v-if="column === '应答器数量' && row['无应答器原因']"
+              class="tag warn"
+              :title="String(row['无应答器原因'])"
+            >无应答器</span>
+            <span
+              v-else-if="column === '备注' && !row[column]"
+              class="hint-text"
+            >待补：{{ missingFields(row) }}</span>
+            <template v-else>{{ row[column] ?? '—' }}</template>
+          </td>
           <td class="row-actions">
             <button
               v-for="action in actions"
@@ -57,7 +76,10 @@
 
     <footer class="page-foot">
       <span>共 {{ total }} 条列车防护记录</span>
-      <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
+      <span v-if="errorMessage" class="error-text">
+        {{ errorMessage }}
+        <button class="link" type="button" @click="reload">重试</button>
+      </span>
     </footer>
   </section>
 </template>
@@ -67,22 +89,56 @@ import { onMounted, ref } from 'vue'
 
 import { request } from '@/api/client'
 
-type Row = Record<string, string | number | null>
+type Row = Record<string, string | number | null | string[]>
+type StatCard = { label: string; value: number }
+type NoBaliseItem = { 设备编号: string; 原因: string }
 
 const ENDPOINT = '/api/atp'
-const columns = ["设备编号", "防护等级", "覆盖区段", "应答器数量", "所属线路", "版本号", "责任人", "防护状态"]
+const columns = ["设备编号", "防护等级", "覆盖区段", "应答器数量", "所属线路", "版本号", "责任人", "防护状态", "备注"]
 const actions = ["启用防护", "提交升级", "停用防护"]
-const statuses = ["待启用", "防护正常", "版本待升级", "已停用"]
-const stats = [{"label": "在运防护设备", "value": 0}, {"label": "待升级版本", "value": 0}, {"label": "覆盖区段数", "value": 0}]
+const filterParamMap: Record<string, string> = { 设备编号: 'keyword', 防护等级: 'level', 覆盖区段: 'section' }
 
+const stats = ref<StatCard[]>([
+  { label: '在运防护设备', value: 0 },
+  { label: '待升级版本', value: 0 },
+  { label: '覆盖区段数', value: 0 },
+  { label: '应答器总数', value: 0 },
+])
+const noBaliseDevices = ref<NoBaliseItem[]>([])
 const rows = ref<Row[]>([])
 const total = ref(0)
 const errorMessage = ref('')
+const noticeMessage = ref('')
 const filters = ref<Record<string, string>>({})
 const filterFields = columns.slice(0, 3)
 
+function missingFields(row: Row) {
+  const fields = row['待补字段']
+  return Array.isArray(fields) && fields.length ? fields.join('、') : '备注'
+}
+
+function buildQuery() {
+  const params = new URLSearchParams()
+  for (const [field, param] of Object.entries(filterParamMap)) {
+    const value = (filters.value[field] ?? '').trim()
+    if (value) {
+      params.set(param, value)
+    }
+  }
+  return params.toString()
+}
+
+function onSearch() {
+  const hasCondition = filterFields.some((field) => (filters.value[field] ?? '').trim())
+  noticeMessage.value = hasCondition
+    ? ''
+    : `查询条件为空，已显示全部记录；可按${filterFields.join('、')}补充条件`
+  void reload()
+}
+
 function resetFilters() {
   filters.value = {}
+  noticeMessage.value = ''
   void reload()
 }
 
@@ -110,17 +166,33 @@ async function runAction(action: string, row: Row) {
   }
 }
 
+async function loadSummary() {
+  const response = await request(`${ENDPOINT}/summary`)
+  if (!response.ok) {
+    throw new Error('列车防护统计读取失败')
+  }
+  const payload = await response.json()
+  stats.value = [
+    { label: '在运防护设备', value: payload['在运防护设备'] ?? 0 },
+    { label: '待升级版本', value: payload['待升级版本'] ?? 0 },
+    { label: '覆盖区段数', value: payload['覆盖区段数'] ?? 0 },
+    { label: '应答器总数', value: payload['应答器总数'] ?? 0 },
+  ]
+  noBaliseDevices.value = payload['无应答器设备'] ?? []
+}
+
 async function reload() {
   errorMessage.value = ''
-  const query = new URLSearchParams(filters.value as Record<string, string>).toString()
   try {
-    const response = await request(`${ENDPOINT}?${query}`)
+    const query = buildQuery()
+    const response = await request(query ? `${ENDPOINT}?${query}` : ENDPOINT)
     if (!response.ok) {
       throw new Error('防护设备列表读取失败')
     }
     const payload = await response.json()
     rows.value = payload.items ?? []
     total.value = payload.total ?? rows.value.length
+    await loadSummary()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '列车防护列表读取失败'
   }
